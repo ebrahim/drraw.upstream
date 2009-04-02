@@ -1,0 +1,22 @@
+* Keep up with RRDTOOL:
+	- start/end/step parameters for DEF
+	- new TICK/PART commands
+	- redefined PRINT/GPRINT
+	- STACK/HRULE deprecation
+	- ..?
+
+* More JavaScript where possible and harmless to improve the interface.
+
+The following random ideas may be worth implementing, or not.
+At this point, it seems unlikely that they will be, so if you really care
+for one of these, you should either (1) write the code yourself and
+contribute it, or (2) consider sponsoring development:
+
+  * Dashboard style display for templates & dashboards
+    (e.g. multiple base selections)
+
+  * Allow events to be displayed using a set of colors
+
+  * Presenting graphs as imagemaps for easier navigation
+
+  * Adding links to allow the user to dump the graphed data as CSV
