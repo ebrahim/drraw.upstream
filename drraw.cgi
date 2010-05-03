@@ -1,6 +1,6 @@
-#! /usr/local/bin/perl -T
+#! /usr/bin/perl -T
 #
-# Copyright (C) 2002, 2003, 2004, 2005 Christophe Kalt
+# Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Christophe Kalt
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -27,7 +27,7 @@
 # NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
 # EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-# $Id: drraw.cgi,v 1.185.2.18 2005/06/19 18:20:50 kalt Exp $
+# $Id: drraw.cgi 1570 2009-02-27 17:49:01Z kalt $
 #
 # Home Page -- http://web.taranis.org/drraw/
 #
@@ -51,6 +51,10 @@ use RRDs;
 # as drraw itself.  You may customize this to be elsewhere.
 my $config = (dirname($0) =~ /(.*)/)[0] . "/drraw.conf"; # Untaint
 
+# This needs to be manually set for stupid stupid File::Find to work
+# in tainted mode.
+$ENV{'PATH'} = '/bin:/usr/bin';
+
 ###############################################################################
 ##   STOP STOP STOP STOP STOP STOP STOP STOP STOP STOP STOP STOP STOP STOP   ##
 ##                                                                           ##
@@ -63,10 +67,12 @@ my $config = (dirname($0) =~ /(.*)/)[0] . "/drraw.conf"; # Untaint
 use vars qw ( $title $header $footer
               %datadirs $dsfilter_def @rranames %rranames $vrefresh $drefresh
               @dv_def @dv_name @dv_secs $gformat $maxtime $crefresh
-              $use_rcs $saved_dir $clean_cache $tmp_dir $ERRLOG %users
+              $use_rcs $use_pnp4nagios
+              $saved_dir $clean_cache $tmp_dir $ERRLOG %users
               %Index $IndexMax $icon_new $icon_closed $icon_open $icon_text
               $icon_help $icon_bug $icon_link
-              $CSS );
+              %colors
+              $CSS $CSS2 $bgColor );
 
 # Default title
 $title = 'Draw Round Robin Archives on the Web';
@@ -133,9 +139,41 @@ $icon_help = '/icons/unknown.gif';
 $icon_bug = '/icons/bomb.gif';
 $icon_link = '/icons/link.gif';
 
+# Default colors
+%colors = ( 'Black'  => '#000000',
+            'Silver' => '#C0C0C0',
+            'Gray'   => '#808080',
+            'White'  => '#FFFFFF',
+            'Maroon' => '#800000',
+            'Red'    => '#FF0000',
+            'Purple' => '#800080',
+            'Fuchsia'=> '#FF00FF',
+            'Green'  => '#008000',
+            'Lime'   => '#00FF00',
+            'Olive'  => '#808000',
+            'Yellow' => '#FFFF00',
+            'Orange' => '#FFA500',
+            'Pink'   => '#FFC0CB',
+            'Navy'   => '#000080',
+            'Blue'   => '#0000FF',
+            'Teal'   => '#008080',
+            'Aqua'   => '#00FFFF',
+            'Invisible' => '' );
+
 # Style Sheet
+$bgColor = '"#FFD89D"';
 $CSS = <<END;
-<!--
+body {
+        background: #FFD89D;
+}
+h1.title {
+    border-bottom: 2px solid #FF9900;
+    padding-bottom: 0.5em;
+    text-align: center;
+}
+h1.title a {
+    color: #FF9900;
+}
 .padless {
     margin-top: 0pt;
     margin-bottom: 0pt;
@@ -161,17 +199,20 @@ $CSS = <<END;
 .simplyred {
     color: red;
 }
+tr.header {
+    background-color: #FF9900;
+}
 .code {
     font-family: Courier;
     font-size: 10px;
-    background-color: silver;
-    border: 1pt black solid;
+    background-color: #FFE2B7;
+    border: 2pt #FF9900 solid;
     padding: 5pt;
 }
 .error {
     font-weight: bold;
     background-color: red;
-    border: 1pt black solid;
+    border: 2pt #FF9900 solid;
     padding: 5pt;
 }
 .help {
@@ -180,8 +221,20 @@ $CSS = <<END;
     border: 1pt black solid;
     padding: 5pt;
 }
--->
+div.tag {
+    border-top: 2px solid #FF9900;
+    margin-top: 1.5em;
+    padding-top: 0.5em;
+    font-size: 75%;
+    text-align: right;
+    color: #FF9900;
+}
+
+div.tag a {
+    color: #FF9900;
+}
 END
+$CSS2 = '';
 
 # Mime Types
 my %Mime = ( 'PNG' => 'image/png',
@@ -191,10 +244,6 @@ my %Mime = ( 'PNG' => 'image/png',
              'GIF' => 'image/gif' );
 my @ImgFormat = ( 'PNG', 'SVG', 'PDF', 'EPS' );
 @ImgFormat = ( 'PNG', 'GIF' ) if ( $RRDs::VERSION < 1.2 );
-
-# This needs to be manually set for stupid stupid File::Find to work
-# in tainted mode.
-$ENV{'PATH'} = '/bin:/usr/bin';
 
 ###############################################################################
 ##   STOP STOP STOP STOP STOP STOP STOP STOP STOP STOP STOP STOP STOP STOP   ##
@@ -232,39 +281,31 @@ if ( !defined(%datadirs) ) {
         end_html;
     exit 1;
 }
+if ( scalar(grep(/\/$/, keys(%datadirs))) > 0 ) {
+    print
+        header(-status=>500),
+        start_html('500 Internal error'),
+        h2("Invalid \%datadirs in $config"),
+        p("Remove any trailing / character in directory paths."),
+        end_html;
+    exit 1;
+}
 
-my $VERSION = '2.1.3';
-my $REVISION = '$Revision: 1.185.2.18 $';  $REVISION =~ s/[^.0-9]+//g;
-my $RELEASE = '1.185.2.18';
-$VERSION = 'CVS-SNAPSHOT ['. $REVISION .' post '. $VERSION .']'
+my $VERSION = '2.2b2';
+my $REVISION = '$LastChangedRevision: 1570 $';  $REVISION =~ s/[^0-9]+//g;
+my $RELEASE = '1570';
+$VERSION = 'SVN-SNAPSHOT ['. $REVISION .' post '. $VERSION .']'
     unless ( $REVISION eq $RELEASE );
-my ( $drraw_ID, $drraw_reported ) = ( time . $$, undef );
 my $DEBUG = 0;
 
-# This one should be configurable
-my %colors = ( 'Black'  => '#000000',
-               'Silver' => '#C0C0C0',
-               'Gray'   => '#808080',
-               'White'  => '#FFFFFF',
-               'Maroon' => '#800000',
-               'Red'    => '#FF0000',
-               'Purple' => '#800080',
-               'Fuchsia'=> '#FF00FF',
-               'Green'  => '#008000',
-               'Lime'   => '#00FF00',
-               'Olive'  => '#808000',
-               'Yellow' => '#FFFF00',
-               'Orange' => '#FFA500',
-               'Pink'   => '#FFC0CB',
-               'Navy'   => '#000080',
-               'Blue'   => '#0000FF',
-               'Teal'   => '#008080',
-               'Aqua'   => '#00FFFF' );
 my %colorsidx = ();
 
 # Additions require changes to &DRAW()
-my @graphtypes = ( 'LINE1', 'LINE2', 'LINE3', 'AREA', 'STACK',
-                   'GPRINT', 'COMMENT', 'HRULE', 'VRULE', '-Nothing-' );
+my @graphtypes = ( 'LINE1', 'LINE2', 'LINE3', 'LINE?', 'AREA', 'STACK', 'TICK',
+                   'GPRINT', 'COMMENT',
+                   'HRULE', 'VRULE',
+                   'SHIFT',
+                   '-Nothing-' );
 
 my %goptions = ( 'gTitle'   => '--title',
                  'gVLabel'  => '--vertical-label',
@@ -276,15 +317,15 @@ my %goptions = ( 'gTitle'   => '--title',
                  'gYLow'    => '--lower-limit',
                  'gFormat'  => '--imgformat');
 
-my $drrawhome = hr . p({-align=>'right'}, 'Brought to you by ',
-                      a({-href=>'http://web.taranis.org/drraw/'}, em('drraw')),
-                       '(version ' . $VERSION . ')');
+my $drrawhome = div({-class=>'tag'}, 'Brought to you by ',
+                    a({-href=>'http://web.taranis.org/drraw/'}, em('drraw')),
+                    '(version ' . $VERSION . ')');
                 
 # Little bit of JavaScript
 my $IndexJS = <<END;
 <script language="JavaScript">
 function IndexClick(srcElement) {
-  var iconElement, targetElement;
+ var iconElement, targetElement;
   iconElement = document.getElementById(srcElement.id + "-icon");
   targetElement = document.getElementById(srcElement.id + "-child");
   if (targetElement.style.display == "none") {
@@ -345,35 +386,99 @@ my $EditorJS = <<END;
 // This should be callable onchange rather than onclick
 // BUT Opera 7.23 does not implement this at all, and IE 6.0 handles it poorly.
 function ShowHideChange(srcElement, target) {
-  var targetElement = document.getElementById(target);
+  var targetElement = document.getElementById(target)
   if (!targetElement)
-      return;
+      return
   if (srcElement.value == "Show") {
       targetElement.style.display = "";
   } else if (srcElement.value == "Hide") {
-      targetElement.style.display = "none";
+      targetElement.style.display = "none"
   }
+}
+
+function ShowNew(srcElement, target) {
+  var targetElement = document.getElementById("newrow" + target)
+  if (!targetElement)
+      return
+  targetElement.style.display = "";
+  srcElement.innerHTML = "Use the following row to " + srcElement.innerHTML.split("to", 2)[1]
 }
 
 function DisableToggle(target) {
-  var DelElement = document.forms.Editor.elements.namedItem(target +"_DELETE");
+  var DelElement = document.forms.Editor.elements.namedItem(target +"_DELETE")
   if (!DelElement)
-      return;
-  var anElement;
+      return
+  var anElement
   var i = 0;
   while (anElement = document.forms.Editor.elements.item(i++)) {
       if (anElement.name.split("_", 1)[0] == target && anElement != DelElement)
-          anElement.disabled = DelElement.checked;
+          anElement.disabled = DelElement.checked
+  }
+  anElement = document.getElementById(target + "_Type")
+  if (anElement) {
+      TypeCB(anElement.value, target)
   }
 }
 
-function CheckBgColor(src, target) {
-  var targetElement = document.getElementById(target);
-  if (!targetElement)
-      return;
-  if ( src.value == "PRINT" || src.value == "GPRINT"
-       || src.value == "COMMENT" || src.value == "-Nothing-" )
-      targetElement.bgColor = "white";
+function ToggleDB(target) {
+  var DElement = document.forms.Editor.elements.namedItem(target +"_dname")
+  if (!DElement)
+      return
+  var status = 0
+  if (DElement.value.substring(0, 1) != "t")
+      status = 1
+  var anElement
+  var i = 0
+  while (anElement = document.forms.Editor.elements.item(i++)) {
+      if (anElement.name.split("_", 1)[0] == target
+          && anElement.name != DElement
+          && anElement.name.split("_", 2)[1] != "DELETE"
+          && anElement.name.split("_", 2)[1] != "Seq"
+          && anElement.name.split("_", 2)[1] != "dname" ) {
+          anElement.disabled = status
+      }
+  }
+}
+
+function TypeCB(value, target) {
+  var targetElement = document.getElementById(target + "_Colorize");
+  if (targetElement) {
+      var ColorList = document.getElementById(target + "_Color");
+      if (value == "PRINT" || value == "GPRINT" || value == "SHIFT"
+          || value == "COMMENT" || value == "-Nothing-") {
+          targetElement.bgColor = $bgColor
+          if (ColorList) {
+              ColorList.value = $bgColor
+              ColorList.disabled = 1
+          }
+      } else if (ColorList)
+          ColorList.disabled = 0
+  }
+  targetElement = document.getElementById(target + "_STACK");
+  if (targetElement) {
+      if (value.substring(0, 4) == "LINE" || value == "AREA") {
+          targetElement.disabled = 0
+      } else {
+          targetElement.disabled = 1
+      }
+  }
+  targetElement = document.getElementById(target + "_Width");
+  if (targetElement) {
+      if (value == "LINE?" || value == "TICK") {
+          if (targetElement.disabled == 1) {
+              if (value == "TICK") {
+                  targetElement.value = "0.1"
+              } else {
+                  targetElement.value = "1"
+              }
+          }
+          targetElement.disabled = 0
+      } else {
+          targetElement.value = "N/A"
+          targetElement.disabled = 1
+      }
+  }
+  return
 }
 
 function SetBgColor(src, target) {
@@ -449,9 +554,10 @@ if ( ! -d "${tmp_dir}" || ! -d "${saved_dir}"
      || ! -w "${tmp_dir}" || ! -w "${saved_dir}" ) {
     print
         header,
-        start_html(-style=>{-code=>$CSS}, -title=>'drraw - '. $title),
+        start_html(-style=>{-code=>"<!--\n$CSS\n$CSS2\n-->\n\n"},
+                   -title=>'drraw - '. $title),
         $header,
-        h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
+        h1({-class=>'title'}, a({-href=>&MakeURL}, $title)),
         h3('Configuration problem!'),
         p("The directories ${tmp_dir} and ${saved_dir} MUST exist and be writable by the CGI user!"),
         $footer,
@@ -472,6 +578,17 @@ if ( $use_rcs && -d "${saved_dir}/RCS" && -w "${saved_dir}/RCS" ) {
     }
 } else {
     $use_rcs = 0;
+}
+
+# Check whether we should make an effort to use pnp4nagios XML data
+if ( $use_pnp4nagios ) {
+    eval { require XML::Simple; import XML::Simple; };
+    if ( $@ ) {
+        warn "Unable to load XML::Simple: $@\n";
+        $use_pnp4nagios = 0;
+    }
+} else {
+    $use_pnp4nagios = 0;
 }
 
 # Check whether MD5 is available for caching
@@ -513,8 +630,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
         header,
         start_html(-style=>{-code=>$CSS}, -title=>'drraw - '. $title),
         $header,
-        h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-        hr;
+        h1({-class=>'title'}, a({-href=>&MakeURL}, $title));
 
     # Browse=Help -> Display help page
     if ( defined(param('Browse')) && param('Browse') eq 'Help' ) {
@@ -629,46 +745,10 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
     if ( $level > 1 ) {
         # For level 2 users,
         #	"Report a bug" link
-        #   "Add this installation to the compatibility report" link
         print
             a({-target=>'drrawhelp',
                href=>MakeURL('Browse', 'Help') . '#contact'},
               img({-src=>$icon_bug, -border=>0}), ' Report a bug, ...'), br;
-
-        $drraw_ID = param('Reported')
-            if ( defined(param('Reported')) );
-
-        my $query = new CGI;
-        $query->delete_all;
-        $query->param('drrawver', "$VERSION");
-        $query->param('perlver', "$]");
-        $query->param('cgiver', "$CGI::VERSION");
-        $query->param('rrdver', "$RRDs::VERSION");
-        $query->param('osname', "$^O");
-        $query->param('websvr', $ENV{'SERVER_SOFTWARE'});
-        $query->param('id', $drraw_ID);
-
-        my $status;
-        if ( defined(param('Reported')) ) {
-            $drraw_reported = $query->query_string();
-            &Indexes_Save('drraw', $drraw_ID, $drraw_reported);
-        } else {
-            if ( defined($drraw_reported) ) {
-                $status = b("out of date")
-                    if ( $drraw_reported ne $query->query_string() );
-            } else {
-                $status = b("unreported");
-            }
-
-            $query->param('url', url());
-            print
-                a({-href=>"http://web.taranis.org/cgi-bin/drraw-report.pl?"
-                       . $query->query_string()},
-                  img({-src=>$icon_link, -border=>0}),
-                  ' Add this installation to the compatibility report.'),
-                ' Status: '. $status
-                if ( defined($status) && scalar(keys(%GraphsById)) + scalar(keys(%TemplatesById)) > 5 && $REVISION eq $RELEASE );
-        }
     }
 
     print
@@ -717,6 +797,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                 '<input type=hidden name=Template value=' . param('Template') . " />\n",
                 p({-align=>'center'},
                   scrolling_list(-name=>'Base',
+                                 -multiple=>'true',
                                  -values=>[sort { $TMPL{$a} cmp $TMPL{$b} }
                                            keys(%TMPL)],
                                  -labels=>\%TMPL,
@@ -746,7 +827,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                     $header,
                     h1($BoardsById{param('Dashboard')}{'Name'}),
                     p({-align=>'center'},
-                      start_form({-align=>'center'}, -method=>'GET'),
+                      start_form({-align=>'center', -method=>'GET'}),
       '<input type=hidden name=Dashboard value='. param('Dashboard') ." />\n",
                       scrolling_list(-name=>'Base',
                                      -values=>[sort keys(%DBTMPL)],
@@ -850,7 +931,8 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                           ? a({-href=>MakeURL('Browse', 'Rcs',
                                               'Id', 'd'. $board)},
                               '[RCS Log]') : '',
-                          br, small(b("". localtime)),
+                          br, small(b("". strftime("%Y-%m-%d %H:%M:%S",
+                                                   localtime))),
                           br,
                           small({-id=>'counter'}))),
                     end_table,
@@ -920,10 +1002,10 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                 print
                     '<p align="center">';
                 print
-                    b(strftime("%a&nbsp;%b&nbsp;%e&nbsp;%H:%M&nbsp;%Y",
+                    b(strftime("%a %Y-%m-%d&nbsp;%H:%M",
                                localtime($startts))
                       .'&nbsp;-&nbsp;'.
-                      strftime("%a&nbsp;%b&nbsp;%e&nbsp;%H:%M&nbsp;%Y",
+                      strftime("%a %Y-%m-%d&nbsp;%H:%M",
                                localtime($endts)))
                       if ( param('View') == -1 && $startts > 0 );
                 print
@@ -942,14 +1024,12 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                             print
                                 td(a({-href=>MakeURL('Mode', 'view',
                                                      'Graph', substr(param("${item}_dname"), 1))},
-                                     img({-src=>&GraphURL(param("${item}_dname"),
-                                                          undef,
-                                                          param('Start'),
-                                                          param('End'),
-                                                          param('dWidth'),
-                                                          param('dHeight'),
-                                                          ( param('dNoLegend') eq 'On' ) ? 1 : undef),
-                                          -align=>'center', -border=>0})));
+                                     &GraphHTML(param("${item}_dname"), undef,
+                                                param('Start'), param('End'),
+                                                param('dWidth'),
+                                                param('dHeight'),
+                                                ( param('dNoLegend') eq 'On' )
+                                                ? 1 : undef)));
                         } elsif ( param("${item}_dname") =~ /^t/ ) {
                             my $titem = param("${item}_dname");
                             $titem =~ s/^t//;
@@ -957,7 +1037,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                             if ( param("${item}_type") eq 'List' ) {
                                 &TMPLFind($TemplatesById{$titem}{'Filter'},
                                           $TemplatesById{$titem}{'Display'});
-                                foreach ( param("${item}_list") ) {
+                                foreach ( sort param("${item}_list") ) {
                                     push @list, $_
                                         if ( $filter eq ''
                                              || $TMPL{$_} =~ /$filter/ );
@@ -966,7 +1046,8 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                                 &TMPLFind($TemplatesById{$titem}{'Filter'},
                                           $TemplatesById{$titem}{'Display'});
                                 my $rx = param("${item}_regex");
-                                foreach ( keys(%TMPL) ) {
+                                foreach ( sort { $TMPL{$a} cmp $TMPL{$b} }
+                                          keys(%TMPL) ) {
                                     push @list, $_
                                         if ( $TMPL{$_} =~ /$rx/
                                              && ( $filter eq ''
@@ -996,14 +1077,12 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                                     td(a({-href=>MakeURL('Mode', 'view',
                                                          'Template', $titem,
                                                          'Base', $list[0])},
-                                         img({-src=>&GraphURL(param("${item}_dname"),
-                                                              $list[0],
-                                                              param('Start'),
-                                                              param('End'),
-                                                              param('dWidth'),
-                                                              param('dHeight'),
-                                                              ( param('dNoLegend') eq 'On' ) ? 1 : undef),
-                                              -align=>'center', -border=>0})));
+                                         &GraphHTML(param("${item}_dname"),
+                                                    $list[0], param('Start'),
+                                                    param('End'),
+                                                    param('dWidth'),
+                                                    param('dHeight'),
+                                                    ( param('dNoLegend') eq 'On' ) ? 1 : undef)));
                                 shift @list;
                                 $col += 1;
                                 if ( $col > param('dCols') ) {
@@ -1095,14 +1174,13 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                                                          $cols[$col],
                                                          'Base',
                                                          $Rows{$row}[$col])},
-                                         img({-src=>&GraphURL('t'. $cols[$col],
-                                                             $Rows{$row}[$col],
-                                                              param('Start'),
-                                                              param('End'),
-                                                              param('dWidth'),
-                                                              param('dHeight'),
-                                                              ( param('dNoLegend') eq 'On' ) ? 1 : undef),
-                                              -align=>'center', -border=>0})));
+                                         &GraphHTML('t'. $cols[$col],
+                                                    $Rows{$row}[$col],
+                                                    param('Start'),
+                                                    param('End'),
+                                                    param('dWidth'),
+                                                    param('dHeight'),
+                                                    ( param('dNoLegend') eq 'On' ) ? 1 : undef)));
                             } else {
                                 print td('N/A');
                             }
@@ -1145,7 +1223,8 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                           ? a({-href=>MakeURL('Browse', 'Rcs',
                                               'Id', 'g'. param('Graph'))},
                               '[RCS Log]') : '',
-                          br, small(b("". localtime)),
+                          br, small(b("". strftime("%Y-%m-%d %H:%M:%S",
+                                                   localtime))),
                           br,
                           small({-id=>'counter'}))),
                     end_table,
@@ -1159,6 +1238,12 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                 &TMPLFind($TemplatesById{param('Template')}{'Filter'},
                           $TemplatesById{param('Template')}{'Display'});
                 $id = 't' . param('Template');
+                my $title = '';
+                $title = ': '. a({-href=>&MakeURL('Mode', 'view',
+                                                  'Template',param('Template'),
+                                                  'Base', param('Base'))},
+                                 $TMPL{param('Base')})
+                    if ( scalar([param('Base')]) == 1 );
                 print
                     start_html({-style=>{-code=>$CSS}, -title=>'drraw - '
                             . $TemplatesById{param('Template')}{'Name'},
@@ -1170,11 +1255,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                     Tr(td(h1(a({-href=>&MakeURL('Mode', 'view',
                                                 'Template',param('Template'))},
                                $TemplatesById{param('Template')}{'Name'})
-                             . ': ',
-                             a({-href=>&MakeURL('Mode', 'view',
-                                                'Template', param('Template'),
-                                                'Base', param('Base'))},
-                               $TMPL{param('Base')}))),
+                             . $title)),
                        td({-align=>'right', -valign=>'top'},
                           a({-href=>&MakeURL()}, b('[Home]')),
                           ( $level > 0 ) ?
@@ -1185,7 +1266,8 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                           ? a({-href=>MakeURL('Browse', 'Rcs',
                                               'Id', 't'. param('Template'))},
                               '[RCS Log]') : '',
-                          br, small(b("". localtime)),
+                          br, small(b("". strftime("%Y-%m-%d %H:%M:%S",
+                                                   localtime))),
                           br,
                           small({-id=>'counter'}))),
                     end_table,
@@ -1193,7 +1275,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                     'ViewerStart = new Date(); ViewerRefresh = '. $vrefresh .';',
                     'setTimeout("ViewerCountdown(\'counter\')", 1000);',
                     '</script>',
-                    start_form({-align=>'center'}, -method=>'GET'),
+                    start_form({-align=>'center', -method=>'GET'}),
                     '<input type=hidden name=Template value=' . param('Template') . " />\n",
                     p({-align=>'center'},
                       popup_menu(-name=>'Base',
@@ -1204,12 +1286,29 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                     end_form;
             }
 
+            # Validate trending specification
+            my ( $trendshift, $trendcount ) = ( 0, 1 );
+            if ( ( defined(param('Shift')) && param('Shift') ne '' )
+                 || ( defined(param('Count')) && param('Count') ne '' ) ) {
+                if ( param('Shift') =~ /^[-+]/ ) {
+                    $trendshift = param('Shift');
+                    $trendcount = param('Count');
+                } else {
+                    &Error("Shift must begin with + or -");
+                }
+            }
             # Display the view chooser
             my $view = 0;
-            print '<p align=center>' if ( defined(param('View')) );
+            print '<p align=center>'
+                if ( defined(param('View'))
+                     || $trendshift > 0
+                     || scalar(@{[param('Base')]}) > 1 );
             while ( $view < scalar(@dv_def) ) {
-                if ( defined(param('View')) ) {
-                    if ( $view == param('View') ) {
+                if ( defined(param('View'))
+                     || $trendshift > 0
+                     || scalar(@{[param('Base')]}) > 1 ) {
+                    # View Links, single graph will follow
+                    if ( defined(param('View')) && $view == param('View') ) {
                         print
                             b(' [' . $dv_name[$view] . '] ');
                     } elsif ( defined(param('Graph')) ) {
@@ -1222,11 +1321,12 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                         print
                             a({-href=>&MakeURL('Mode', 'view',
                                                'Template', param('Template'),
-                                               'Base', param('Base'),
+                                               'Base', [ param('Base') ],
                                                'View', $view)},
                               ' [' . $dv_name[$view] . '] ');
                     }
                 } else {
+                    # Graphs Links for the pre-defined views
                     print
                         p({-align=>'center'},
                           a({-href=>MakeURL('Mode', 'view',
@@ -1235,11 +1335,8 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                                             : ( 'Template', param('Template'),
                                                 'Base', param('Base') ),
                                             'View', $view)},
-                            img({-src=>&GraphURL($id, 
-                                                ( defined(param('Base')) ) ?
-                                                param('Base') : undef,
-                                                $dv_def[$view]),
-                                 -align=>'center', -border=>0})),
+                            &GraphHTML($id, ( defined(param('Base')) ) ?
+                                       param('Base') : undef, $dv_def[$view])),
                           br,
                           b($dv_name[$view]));
                 }
@@ -1256,7 +1353,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                 }
             }
 
-            # Display the custom view entry fields
+            # Display the custom view (Start/End) entry fields
             print
                 start_form({-align=>'center', -method=>'GET'}),
                 '<input type=hidden name=View value=-1 />',
@@ -1264,59 +1361,89 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                 '<input type=hidden name=Graph value='
                 . param('Graph') . ' />'
                 : '<input type=hidden name=Template value='
-                . param('Template') . ' />'
-                . '<input type=hidden name=Base value="'
-                . param('Base') . '" />',
+                . param('Template') . ' />';
+            if ( defined(param('Base')) && scalar(@{[param('Base')]}) > 0 ) {
+                foreach ( param('Base') ) {
+                    print "<input type='hidden' name='Base' value='$_' />";
+                }
+            }
+            my $trend = '';
+            $trend = '<br>'.
+                     'Shift: '. textfield(-name=>'Shift').
+                     ' Count: '. textfield(-name=>'Count', -size=>2)
+                     if ( defined(param('View')) );
+            print
                 p({-align=>'center'},
                   'Start: ', textfield(-name=>'Start'),
                   'End: ', textfield(-name=>'End'),
-                  submit(-name=>'Mode', -value=>'view')),
+                  submit(-name=>'Mode', -value=>'view'),
+                  $trend),
                 end_form;
 
             # Validate Start/End times
+            my $start = ( defined(param('Start')) && param('Start') ne '' )
+                ? param('Start') : 'end - 1 day';
+            my $end   = ( defined(param('End')) && param('End') ne '' )
+                ? param('End') : 'now';
             my ( $startts, $endts );
             if ( defined(&RRDs::times) ) {
-                ( $startts, $endts ) = RRDs::times(( defined(param('Start'))
-                                                     && param('Start') ne '' )
-                                                   ? param('Start')
-                                                   : 'end - 1 day',
-                                                   ( defined(param('End'))
-                                                     && param('End') ne '' )
-                                                   ? param('End') : 'now' );
-                  
+                ( $startts, $endts ) = RRDs::times($start, $end);
                 if ( defined(RRDs::error) ) {
                     &Error(RRDs::error);
                 }
             }
 
             # Links to graphs
-            if ( defined(param('View')) ) {
-                print
-                    '<p align=center>',
-                    img({-src=>&GraphURL($id,
-                                         ( defined(param('Base')) ) ?
-                                         param('Base') : undef,
-                                         param('Start'), param('End')),
-                         -align=>'center', -border=>0}),
-                    br;
-                if ( param('View') >= 0 ) {
+            if ( defined(param('Base')) && scalar(@{[param('Base')]}) > 1 ) {
+                # Dashboard style display for templates
+                foreach ( param('Base') ) {
                     print
-                        b($dv_name[param('View')]);
-                } else {
-                    if ( defined(&RRDs::times) ) {
+                        p({-align=>'center'},
+                          a({-href=>MakeURL('Mode', 'view',
+                                            'Template', param('Template'),
+                                            'Base', $_)},
+                            &GraphHTML($id, $_, param('Start'), param('End'))));
+                }
+            } elsif ( defined(param('View')) ) {
+                # Single graph view, or trend page
+                while ( $trendcount-- > 0 ) {
+                    print
+                        '<p align=center>',
+                        &GraphHTML($id, ( defined(param('Base')) ) ?
+                                   param('Base') : undef, $start, $end),
+                        br;
+                    if ( param('View') >= 0 ) {
                         print
-                            b(strftime("%a&nbsp;%b&nbsp;%e&nbsp;%H:%M&nbsp;%Y",
-                                       localtime($startts))
-                              .'&nbsp;-&nbsp;'.
-                              strftime("%a&nbsp;%b&nbsp;%e&nbsp;%H:%M&nbsp;%Y",
-                                       localtime($endts)));
+                            b($dv_name[param('View')]);
                     } else {
-                        print
-                            b('Custom View');
+                        if ( defined(&RRDs::times) ) {
+                            print
+                                b(strftime("%a %Y-%m-%d&nbsp;%H:%M",
+                                           localtime($startts))
+                                  .'&nbsp;-&nbsp;'.
+                                  strftime("%a %Y-%m-%d&nbsp;%H:%M",
+                                           localtime($endts)));
+                        } else {
+                            print
+                                b('Custom View');
+                        }
+                    }
+                    print
+                        '</p>';
+                    # Trend adjustments
+                    if ( $trendcount > 0 ) {
+                        $start .= " $trendshift" unless ( $start =~ /end/ );
+                        $end   .= " $trendshift" unless ( $end =~ /start/ );
+                        if ( defined(&RRDs::times) ) {
+                            ( $startts, $endts ) = RRDs::times($start, $end);
+                            if ( defined(RRDs::error) ) {
+                                &Error(RRDs::error);
+                                last;
+                            }
+                            last if ( $startts > time() );
+                        }
                     }
                 }
-                print
-                    '</p>';
             }
         }
         print
@@ -1332,7 +1459,8 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                       ( defined(param('End')) ) ? param('End') : undef,
                       ( defined(param('Width')) ) ? param('Width') : undef,
                       ( defined(param('Height')) ) ? param('Height') : undef,
-                      ( defined(param('NoLegend')) ) ? param('NoLegend') : undef);
+                      ( defined(param('NoLegend')) ) ? param('NoLegend') : undef,
+                      ( defined(param('Format')) ) ? param('Format') : undef);
 
         &Definition_Load($graph[0]);
         unlink "${tmp_dir}/$1" if ( $graph[0] =~ /^(\d+\.\d+)$/ ); # Untaint
@@ -1346,6 +1474,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
         param(-name=>'gWidth', -value=>$graph[4]) if ( defined($graph[4]) );
         param(-name=>'gHeight', -value=>$graph[5]) if ( defined($graph[5]) );
         param(-name=>'gNoLegend', -value=>1) if ( defined($graph[6]) );
+        param(-name=>'gFormat', -value=>$graph[7]) if ( defined($graph[7]) );
         &DSLoad;
         &Cache_Load;
         &Sort_Colors_Init;
@@ -1433,8 +1562,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                     start_html(-style=>{-code=>$CSS},
                                -title=>'drraw - '. $title),
                     $header,
-                    h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-                    hr,
+                    h1({-class=>'title'}, a({-href=>&MakeURL}, $title)),
                     h1('Permission Denied!');
             } else {
                 unlink "${saved_dir}/d" . $1; # Untaint
@@ -1446,8 +1574,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                                                 &MakeURL('Browse',
                                                          'AllDashboards')})),
                     $header,
-                    h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-                    hr,
+                    h1({-class=>'title'}, a({-href=>&MakeURL}, $title)),
                     h1('Board Deleted!');
                 Indexes_Save('d', $1, '');
             }
@@ -1456,8 +1583,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                 header,
                 start_html(-style=>{-code=>$CSS}, -title=>'drraw - '. $title),
                 $header,
-                h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-                hr,
+                h1({-class=>'title'}, a({-href=>&MakeURL}, $title)),
                 &Error('Deletion failed.');
         }
     } else {
@@ -1465,8 +1591,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
             header,
             start_html(-style=>{-code=>$CSS}, -title=>'drraw - '. $title),
             $header,
-            h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-            hr;
+            h1({-class=>'title'}, a({-href=>&MakeURL}, $title));
     }
 
     # New editing session based on an existing graph?
@@ -1604,8 +1729,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                     start_html(-style=>{-code=>$CSS},
                                -title=>'drraw - '. $title),
                     $header,
-                    h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-                    hr,
+                    h1({-class=>'title'}, a({-href=>&MakeURL}, $title)),
                     h1('Permission Denied!');
             } else {
                 unlink "${saved_dir}/g" . $1; # Untaint
@@ -1617,8 +1741,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                                                 &MakeURL('Browse',
                                                          'AllGraphs')})),
                     $header,
-                    h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-                    hr,
+                    h1({-class=>'title'}, a({-href=>&MakeURL}, $title)),
                     h1('Graph Deleted!');
                 Indexes_Save('g', $1, '');
             }
@@ -1632,8 +1755,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                     start_html(-style=>{-code=>$CSS},
                                -title=>'drraw - '. $title),
                     $header,
-                    h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-                    hr,
+                    h1({-class=>'title'}, a({-href=>&MakeURL}, $title)),
                     h1('Permission Denied!');
             } else {
                 unlink "${saved_dir}/t" . $1;
@@ -1645,8 +1767,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                                                 &MakeURL('Browse',
                                                          'AllTemplates')})),
                     $header,
-                    h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-                    hr,
+                    h1({-class=>'title'}, a({-href=>&MakeURL}, $title)),
                     h1('Template Deleted!');
                 Indexes_Save('t', $1, '');
             }
@@ -1655,8 +1776,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                 header,
                 start_html(-style=>{-code=>$CSS}, -title=>'drraw - '. $title),
                 $header,
-                h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-                hr,
+                h1({-class=>'title'}, a({-href=>&MakeURL}, $title)),
             &Error('Deletion failed.');
         }
     } else {
@@ -1664,8 +1784,7 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
             header,
             start_html(-style=>{-code=>$CSS}, -title=>'drraw - '. $title),
             $header,
-            h1({-align=>'center'}, a({-href=>&MakeURL}, $title)),
-            hr;
+            h1({-class=>'title'}, a({-href=>&MakeURL}, $title));
     }
 
     # New editing session based on an existing graph?
@@ -1781,9 +1900,8 @@ if ( scalar(@pnames) == 0 || defined(param('Browse')) ) {
                                                 -default=>param('Code'),
                                                 -onclick=>'ShowHideChange(this, "CODE")')))),
                         p({-align=>'center'},
-                          img({-src=>&GraphURL($gname, undef,
-                                               param('Start'), param('End')),
-                               -align=>'center', -border=>0}));
+                          &GraphHTML($gname, undef,
+                                     param('Start'), param('End')));
                 } else {
                     print
                         table({-align=>'center', -cellpadding=>5, -border=>1},
@@ -2016,7 +2134,7 @@ sub Indexes_Load
                 $TemplatesById{$1}{'Display'} = $2
                     if ( -f "${saved_dir}/t${1}" );
             } elsif ( /^drraw=(\d+)\/(.*)$/ ) {
-                ( $drraw_ID, $drraw_reported )  = ( $1, $2 );
+                next;
             } elsif ( /^t(\d+\.\d+)=(.*)$/ ) {
                 $TemplatesById{$1}{'Owner'} = $2
                     if ( -f "${saved_dir}/t${1}" );
@@ -2128,6 +2246,7 @@ sub Indexes_Save
             foreach $item ( grep(/^[a-z]+_Seq$/, param()) ) {
                 $item =~ s/_Seq//;
                 if ( param("${item}_type") eq 'Base' ) {
+                    next unless ( param("${item}_dname") =~ /^t/ );
                     $BoardsById{$idx}{'Filters'}{$item}{'Template'} = param("${item}_dname");
                     $BoardsById{$idx}{'Filters'}{$item}{'Template'} =~ s/^t//;
                     $BoardsById{$idx}{'Filters'}{$item}{'Filter'} = param("${item}_regex");
@@ -2141,13 +2260,6 @@ sub Indexes_Save
             delete($BoardsById{$idx}{'Owner'});
         }
     }
-    ( $drraw_ID, $drraw_reported ) = ( $idx, $name )
-        if ( $type eq 'drraw' );
-    print INDEX 'drraw='. $drraw_ID .'/';
-    if ( defined($drraw_reported) ) {
-        print INDEX $drraw_reported;
-    }
-    print INDEX "\n";
     foreach $idx ( keys(%BoardsById) ) {
         print INDEX 'd' . $idx . ':' . $BoardsById{$idx}{'Name'} . "\n";
         if ( defined($BoardsById{$idx}{'Filters'}) ) {
@@ -2180,7 +2292,7 @@ sub GraphIndex
                    keys(%GraphsById) ) {
         next unless ( $GraphsById{$gid}{'Name'} =~ /$_[0]/ );
         print
-            Tr({-bgcolor=>($silver++ % 2 == 0) ? '#E0E0E0' : ''},
+            Tr({-class=>($silver++ % 2 == 0) ? 'header' : ''},
                td(a({-href=>MakeURL('Mode', 'view', 'Graph', $gid)},
                     '[View]'), ' ',
                   ( $level > 0 ) ?
@@ -2212,7 +2324,7 @@ sub TemplateIndex
         &TMPLFind($TemplatesById{$tid}{'Filter'},
                   $TemplatesById{$tid}{'Display'});
         print
-            Tr({-bgcolor=>($silver++ % 2 == 0) ? '#E0E0E0' : ''},
+            Tr({-class=>($silver++ % 2 == 0) ? 'header' : ''},
                td(a({-href=>MakeURL('Mode', 'view', 'Template', $tid)},
                     '[View]'), ' ',
                   ( $level > 0 ) ?
@@ -2273,7 +2385,7 @@ sub DashBoardIndex
                 end_form;
         }
         print
-            Tr({-bgcolor=>($silver++ % 2 == 0) ? '#E0E0E0' : ''},
+            Tr({-class=>($silver++ % 2 == 0) ? 'header' : ''},
                td(a({-href=>MakeURL('Mode', 'view', 'Dashboard', $did)},
                     '[View]'), ' ',
                   ( $level > 0 ) ?
@@ -2301,6 +2413,9 @@ sub CustomIndex
 {
     croak 'CustomIndex(ref, id)' if ( scalar(@_) != 2);
     my ( $ref, $id ) = ( @_ );
+
+    die "Please update CGI.pm to version 3.05 or newer to use Custom Indexes\n"
+        if ( $CGI::VERSION > 2.91 && $CGI::VERSION < 3.05 );
 
     if ( ref($ref) eq 'HASH' ) {
         my $key;
@@ -2401,10 +2516,35 @@ sub Definition_Load
                                && $plist[0] !~ /^(g|t|d)/ ); # XXX Too vague..
         shift @plist;
     }
+
+    my $gform = param('gFormat');
     param('gFormat', 'PNG')
-        if ( param('gFormat') eq 'GIF' && $RRDs::VERSION >= 1.2 );
+        if ( defined($gform) && $gform eq 'GIF' && $RRDs::VERSION >= 1.2 );
 
     param('Code', 'Hide');
+}
+
+sub Definition_Get
+{
+    croak 'Definition_Get(file, name)' if ( scalar(@_) != 2);
+    my ( $file, $name ) = ( @_ );
+
+    die "Invalid Request: $file\n" unless ( $file =~ /^(g|t|d)*\d+\.\d+$/ );
+
+    if ( $file =~ /^(g|t|d)/ ) {
+        $file = $saved_dir . '/' . $file;
+    } else {
+        $file = $tmp_dir . '/' . $file;
+    }
+
+    if (!open(FILE, "< ${file}")) {
+        &Error("Could not open definition file \"$file\" to get $name: $!");
+        return undef;
+    }
+    my $def = new CGI(\*FILE);
+    close FILE;
+
+    return $def->param($name);
 }
 
 sub Definition_Save
@@ -2418,6 +2558,7 @@ sub Definition_Save
     } else {
         $rcsuser = "-wguest[$ENV{REMOTE_ADDR}]";
     }
+    $rcsuser =~ /(.+)/; $rcsuser = $1;  # Untaint
 
     my $rcs;
 
@@ -2459,8 +2600,8 @@ sub Definition_Save
     }
 
     if ( $use_rcs && defined($rcs) ) {
-        if ( $ok ) {
-            if ( $rcs->ci('-u', '-m'. $log, $rcsuser) != 1 ) {
+        if ( $ok && $log =~ /(.+)/ ) {
+            if ( $rcs->ci('-u', '-m'. $1, $rcsuser) != 1 ) {
                 &Error("Failed to check in $file");
                 $ok = 0;
             }
@@ -2480,7 +2621,8 @@ sub DBFind
     @rrdfiles = ();
     @evtfiles = ();
     alarm(0); # This may take a while, and that'd be okay..
-    find({wanted=>\&DBFinder, untaint=>1, # Untaint, lame...
+    find({wanted=>\&DBFinder, no_chdir=>1, follow=>1,
+          untaint=>1, # Untaint, lame...
           untaint_pattern=>qr|^([-+@\w./:]+)$|}, keys(%datadirs));
     alarm($maxtime);
     Cache_Save;
@@ -2488,21 +2630,20 @@ sub DBFind
 
 sub DBFinder
 {
-    if ( -f $_ && ( /^.+\.rrd$/ || /^.+\.evt$/ ) ) {
-        my $dir = $File::Find::dir;
+    if ( -f $_ && ( /.\.rrd$/ || /.\.evt$/ ) ) {
         my $start;
         foreach $start ( keys(%datadirs) ) {
-            $dir =~ s/^${start}(\/|$)//;
-            if ( $dir ne $File::Find::dir ) {
-                $dir .= '/' unless ( $dir eq '' );
+            if ( $_ =~ /^${start}\/(.+)$/ ) {
+                my $end = $1;
                 if ( $_ =~ /\.rrd$/ ) {
-                    push @rrdfiles, $start . '//' . $dir . $_;
+                    push @rrdfiles, $start . '//' . $end;
                 } else {
-                    push @evtfiles, $start . '//' . $dir . $_;
+                    push @evtfiles, $start . '//' . $end;
                 }
                 return;
             }
         }
+        warn "DBFinder called for $_ which does not match any of \%datadirs: ". join(", ", keys(%datadirs)) ."\n";
         die "Something is wrong in DBFinder... (". $File::Find::dir .")\n";
     }
 }
@@ -2603,13 +2744,13 @@ sub DBAdd
 
     foreach $cf ( param('db_RRAS') ) {
         foreach $file ( param('db_FILES') ) {
-            my ($start, $step, $DSnames, $data)
-                = RRDs::fetch($file, $cf, '-s', 0, '-e', 0);
+            my ($last) = RRDs::last($file);
+            my ($start, $step, $DSnames, $data) = RRDs::fetch($file, $cf);
             my $ds;
             if ( defined($DSnames) && scalar(@{$DSnames}) > 0 ) {
                 foreach $ds ( @{$DSnames} ) {
                     my $filter = param('db_FILTER');
-                    next if ( $ds !~ /$filter/ );
+                    next if ( $filter ne '' && "$ds" !~ /$filter/ );
                     &DSNew($file, $ds, $cf);
                 }
             } else {
@@ -2736,7 +2877,23 @@ sub DSLoad
 {
     my $seq = 1;
     my $ds;
-    foreach $ds ( sort { param("${a}_Seq") <=> param("${b}_Seq") }
+    foreach $ds ( sort {
+                       my $param_a =  param("${a}_Seq");
+                       my $param_b = param("${b}_Seq");
+                       if (defined($param_a)) {
+                           if (defined($param_b)) {
+                               return ($param_a <=> $param_b);
+                           } else {
+                               return -1;
+                           }
+                       } else {
+                           if (defined($param_b)) {
+                               return 1;
+                           } else {
+                               return 0;
+                           }
+                       }
+                  }
                   param('DS') ) {
         if ( defined($DS{$ds}) ) {
             &Error("Discarded duplicate DS definition: $ds");
@@ -2777,6 +2934,11 @@ sub DSLoad
         }
         param(-name=>"${ds}_Color", -value=>'White')
             if ( param("${ds}_Type") =~ /(PRINT|COMMENT|-Nothing-)/ );
+        param(-name=>"${ds}_Width", -value=>'')
+            unless ( defined(param("${ds}_Width")) );
+        param(-name=>"${ds}_tWidth", -value=>'')
+            if ( defined(param("${ds}_Formula"))
+                 && !defined(param("${ds}_tWidth")) );
     }
     param(-name=>'DS', -value=>[keys(%DS)]);
 }
@@ -2785,11 +2947,13 @@ sub DSLoad
 sub DSConfig
 {
     my $color;
+    my $i =0;
     print
         '<p>',
         start_table({-border=>1,-align=>'center'}),
         caption(em(b('Available Colors'))), '<tr>';
     foreach $color ( sort Sort_Colors (keys(%colors)) ) {
+        next if ( $colors{$color} eq '' );
         print "<td bgcolor=" . $colors{$color} . '>';
         if ( (77*hex(substr($colors{$color}, 1, 2))
               + 137*hex(substr($colors{$color}, 3, 2))
@@ -2798,7 +2962,9 @@ sub DSConfig
         } else {
             print b($color);
         }
-        print '</td>'
+        print '</td>';
+        $i++;
+        print "</tr>\n<tr>" if (($i % 6) == 0);
     }
     print
         '</tr>' . end_table,
@@ -2808,8 +2974,10 @@ sub DSConfig
     }
     print ']</script>';
 
-    my $new = &DSNew('', '', '');
-    param("${new}_DELETE", 'Y');
+    my @new = ( &DSNew('', '', ''), &DSNew('', '', ''), &DSNew('', '', '') );
+    param("$new[0]_DELETE", 'Y');
+    param("$new[1]_DELETE", 'Y');
+    param("$new[2]_DELETE", 'Y');
 
     my ( %rrd, %evt );
     my $file;
@@ -2839,10 +3007,11 @@ sub DSConfig
         caption(em(b('Data Source Configuration'),
                    a({-href=>MakeURL('Browse', 'Help') . '#dsconfig',
                       -target=>'drrawhelp'}, small('Help')))),
-        Tr({-bgcolor=>'silver'}, th(['DEL'. br .'?',
+        Tr({-class=>'header'}, th(['DEL'. br .'?',
                                      'Name'. br .'Seq',
                                      'Data Source ('.
                                      checkbox(-name=>'DSFList',
+                                              -title=>'Select to enable drop-down filename lists',
                                               -label=>'Lists', -value=>'Y')
                                      .')',
                                      'RRA'. br .'CDEF',
@@ -2851,6 +3020,7 @@ sub DSConfig
                                      small({-style=>'cursor:pointer'},
                                            join('/', map { span({-onclick=>"ToggleXTRA(\"$_\")"}, $rranames{$_}) } @rranames)). br .
                                      small(radio_group(-name=>'XTRAS',
+                                                       -title=>'Click above to toggle all additional GPRINTs and BR checkboxes',
                                                        -values=>['On',
                                                                  'Off'])),
                                      small({-style=>'cursor:pointer',
@@ -2859,159 +3029,283 @@ sub DSConfig
 
     foreach $ds ( sort { param("${a}_Seq") <=> param("${b}_Seq") }
                   keys(%DS) ) {
-        Delete("${ds}_DELETE") unless ( $ds eq $new );
-        if ( $ds eq $new ) {
+        Delete("${ds}_DELETE") unless ( grep(/^$ds$/, @new) );
+        # Extra rows for "new" DS entries
+        my $n;
+        if ( $ds eq $new[0] ) {
+            $n = 0;
             print
-                Tr(td({-colspan=>8, -align=>'center', -bgcolor=>'silver'}, 'Use the following row to add a new CDEF to the graph, or to define a DS based on a perl regular expression.'));
+                Tr({-class=>'header'}, td({-colspan=>8, -align=>'center', -id=>'new0', -onclick=>'ShowNew(this, '. $n .')'}, 'Use the following row to define a new CDEF or VDEF.'));
+        } elsif ( $ds eq $new[1] ) {
+            $n = 1;
+            print
+                Tr({-class=>'header'}, td({-colspan=>8, -align=>'center', -id=>'new1', -onclick=>'ShowNew(this, '. $n .')'}, 'Use the following row to add a new RULE to the graph.'));
+        } elsif ( $ds eq $new[2] ) {
+            $n = 2;
+            print
+                Tr({-class=>'header'}, td({-colspan=>8, -align=>'center', -id=>'new2', -onclick=>'ShowNew(this, '. $n .')'}, 'Use the following row to define a DS based on a perl regular expression.'));
         }
-        if ( param("${ds}_File") =~ /\.rrd$/ || param("${ds}_File") eq ''
-             || defined(param("${ds}_Formula")) ) {
-            my $rowcount = 1;
-            my $filecell;
-            if ( defined(param("${ds}_Formula")) || $ds eq $new ) {
-                # CDEF Template
-                $filecell = br .'File&nbsp;RE:'
-                    .textfield(-name=>"${ds}_File", -class=>'small',
-                               -default=>param("${ds}_File"), -size=>40)
-                    .br .'DS:'
-                    .textfield(-name=>"${ds}_DS", -class=>'small',
-                               -default=>param("${ds}_DS"))
-                    .br .'Element:'
-                    .textfield(-name=>"${ds}_Element", -class=>'small',
-                               -default=>param("${ds}_Element"))
-                    .'Formula:'
-                    .textfield(-name=>"${ds}_Formula", -class=>'small',
-                               -default=>param("${ds}_Formula"));
-                $filecell .= hidden("${ds}_NEW", '');
-                $rowcount = 2 unless ( $ds eq $new );
-            } elsif ( param("${ds}_File") eq '' ) {
+
+        # Figure out once and for all what we're dealing with
+        my $type;
+        my $rowcount = 1;
+        if ( defined(param("${ds}_Formula")) || $ds eq $new[2] ) {
+            # DS Template
+            $type = 'tmpl';
+            $rowcount = 2 unless ( $ds eq $new[2] );
+        } elsif ( param("${ds}_File") eq '' ) {
+            if ( param("${ds}_Type") !~ /RULE$/
+                 && !&IsNum(param("${ds}_CDEF"))
+                 && $ds ne $new[1]) {
                 # Pure CDEF
-                $filecell = 'CDEF&nbsp;Definition'. hidden("${ds}_File", '');
+                $type = 'def';
             } else {
-                # Regular DS
-                if ( defined(param('DSFList')) && param('DSFList') eq 'Y' )
-                {
-                    $filecell = popup_menu(-name=>"${ds}_File",
-                                           -class=>'small',
-                                   -values=>[sort { &datafnsort($rrd{$a},
-                                                                $rrd{$b}) }
-                                             keys(%rrd)],
-                                           -labels=>\%rrd,
-                                           -default=>$DS{$ds});
-                } else {
-                    $filecell = hidden("${ds}_File") . $DS{$ds};
-                }
-                $filecell .= br .b(param("${ds}_DS"))
-                    .hidden("${ds}_DS", param("${ds}_DS"));
+                # RULE
+                $type = 'rule';
             }
-            print
-                Tr({-class=>'small'},
-                   td({-align=>'center', -rowspan=>$rowcount},
-                      checkbox(-name=>"${ds}_DELETE",
-                               -label=>'', -value=>'Y',
-                               -onclick=>"DisableToggle(\"${ds}\")")),
-                   td(b($ds) . ':' . textfield(-name=>"${ds}_Seq", 
-                                               -class=>'small',
-                                               -default=>param("${ds}_Seq"),
-                                               -size=>2)),
-                   td($filecell),
-                   td(popup_menu(-name=>"${ds}_RRA", -class=>'small',
-                                 -values=>[@rranames],
-                                 -labels=>\%rranames,
-                                 -default=>param("${ds}_RRA")) . br,
-                      textfield(-name=>"${ds}_CDEF", -class=>'small',
-                                -default=>param("${ds}_CDEF"),
-                                -size=>11)),
-                   td({-bgcolor=>$colors{param("${ds}_Color")},
-                       -id=>"${ds}_Colorize"},
-                      popup_menu(-name=>"${ds}_Type", -class=>'small',
-                                 -values=>[@graphtypes],
-                                 -default=>param("${ds}_Type"),
-                                 -onchange=>"CheckBgColor(this, \"${ds}_Colorize\")"),
-                      popup_menu(-name=>"${ds}_Color", -class=>'small',
-                                 -values=>[sort Sort_Colors keys(%colors)],
-                                 -default=>param("${ds}_Color"),
-                                 -onchange=>"SetBgColor(this, \"${ds}_Colorize\")")),
-                   td(textfield(-name=>"${ds}_Label", -class=>'small',
-                                -default=>param("${ds}_Label"),
-                                -size=>15)),
-                   td({-align=>'center'},
-                      checkbox_group(-name=>"${ds}_XTRAS",
-                                     -values=>[@rranames],
-                                     -labels=>\%rra,
-                                     -defaults=>param("${ds}_XTRAS"))),
-                   td({-align=>'center'},
-                      checkbox(-name=>"${ds}_BR", -label=>'', -value=>'Y')));
-            print
-                Tr({-class=>'small'},
-                   td({-align=>'center'}, 'N/A'),
-                   td(checkbox_group(-name=>"${ds}_tColors",
-                                     -values=>[sort Sort_Colors keys(%colors)],
-                                     -defaults=>param("${ds}_tColors"))),
-                   td($rranames{param("${ds}_RRA")}, br,
-                      textfield(-name=>"${ds}_tCDEF", -class=>'small',
-                                -size=>11,
-                                -default=>param("${ds}_tCDEF"))),
-                   td(popup_menu(-name=>"${ds}_tType", -class=>'small',
-                                 -values=>[grep(!/RULE/, @graphtypes)],
-                                 -default=>param("${ds}_tType")),
-                      checkbox(-name=>"${ds}_tSTACK", -values=>'Y',
-                               -label=>'STACK?')),
-                   td(textfield(-name=>"${ds}_tLabel", -class=>'small',
-                                -size=>15,
-                                -default=>param("${ds}_tLabel"))),
-                   td({-align=>'center'},
-                      checkbox_group(-name=>"${ds}_tXTRAS",
-                                     -values=>[@rranames],
-                                     -labels=>\%rra,
-                                     -defaults=>param("${ds}_tXTRAS"))),
-                   td({-align=>'center'},
-                      checkbox(-name=>"${ds}_tBR", -label=>'', -value=>'Y')))
-                if ( $rowcount == 2 );
+        } elsif ( param("${ds}_File") =~ /\.rrd$/ ) {
+            # Regular DS
+            $type = 'ds';
         } elsif ( param("${ds}_File") =~ /\.evt$/ ) {
-            print
-                Tr({-class=>'small'},
-                   td({-align=>'center'},
-                      checkbox(-name=>"${ds}_DELETE",
-                               -label=>'', -value=>'Y',
-                               -onclick=>"DisableToggle(\"${ds}\")")),
-                   td(b($ds) . ':' . textfield(-name=>"${ds}_Seq", 
-                                               -class=>'small',
-                                               -default=>param("${ds}_Seq"),
-                                               -size=>2)),
-                   td(( defined(param('DSFList')) && param('DSFList') eq 'Y' )?
-                      popup_menu(-name=>"${ds}_File", -class=>'small',
-                                 -values=>[sort { &datafnsort($evt{$a},
-                                                              $evt{$b}) }
-                                           keys(%evt)],
-                                 -labels=>\%evt,
-                                 -default=>$DS{$ds})
-                      : (hidden("${ds}_File") . $DS{$ds}),
-                      br, 'Event Filter Regex: ',
-                      textfield(-name=>"${ds}_EvtFilter", -class=>'small',
-                                -default=>param("${ds}_EvtFilter"))),
-                   td({-align=>'center'}, 'N/A'),
-                   td({-bgcolor=>$colors{param("${ds}_Color")},
-                       -id=>"${ds}_Colorize"},
-                      popup_menu(-name=>"${ds}_Type", -class=>'small',
-                                 -values=>['VRULE'],
-                                 -default=>param("${ds}_Type"),
-                                 -onchange=>"CheckBgColor(this, \"${ds}_Colorize\")"),
-                      popup_menu(-name=>"${ds}_Color", -class=>'small',
-                                 -values=>[sort Sort_Colors keys(%colors)],
-                                 -default=>param("${ds}_Color"),
-                                 -onchange=>"SetBgColor(this, \"${ds}_Colorize\")")),
-                   td(textfield(-name=>"${ds}_Label", -class=>'small',
-                                -default=>param("${ds}_Label"),
-                                -size=>15)),
-                   td({-align=>'center'}, 'N/A'),
-                   td({-align=>'center'},
-                      checkbox(-name=>"${ds}_BR", -label=>'', -value=>'Y')));
+            # Event file
+            $type = 'evt';
+        } else {
+            print Tr(td({-rowspan=>8, -class=>'error', -align=>'center'},
+                        "Skipping invalid DS $ds"));
+            next;
         }
+
+        print "<tr class='small'";
+        print " id='newrow". $n ."' " if ( defined($n) );
+        print ">";
+        # Delete box
+        print td({-align=>'center', -rowspan=>$rowcount},
+                 checkbox(-name=>"${ds}_DELETE",
+                          -title=>'If checked, this row will be deleted on the next update',
+                          -label=>'', -value=>'Y',
+                          -onclick=>"DisableToggle(\"${ds}\")"));
+
+        # Name/Seq
+        print td(b($ds) . ':' . textfield(-name=>"${ds}_Seq",
+                                          -title=>'Change to reorder the table rows',
+                                          -class=>'small',
+                                          -default=>param("${ds}_Seq"),
+                                          -size=>2));
+
+        # Data Source.. ouch
+        if ( $type eq 'ds' ) {
+            print td(( defined(param('DSFList')) && param('DSFList') eq 'Y' )?
+                     popup_menu(-name=>"${ds}_File", -class=>'small',
+                                -values=>[sort { &datafnsort($rrd{$a},
+                                                             $rrd{$b}) }
+                                          keys(%rrd)],
+                                -labels=>\%rrd,
+                                -default=>$DS{$ds})
+                     : (hidden("${ds}_File") . $DS{$ds}),
+                     br,
+                     b(param("${ds}_DS")),
+                     hidden("${ds}_DS", param("${ds}_DS")));
+        } elsif ( $type eq 'evt' ) {
+            print td(( defined(param('DSFList')) && param('DSFList') eq 'Y' )?
+                     popup_menu(-name=>"${ds}_File", -class=>'small',
+                                -values=>[sort { &datafnsort($evt{$a},
+                                                             $evt{$b}) }
+                                          keys(%evt)],
+                                -labels=>\%evt,
+                                -default=>$DS{$ds})
+                     : (hidden("${ds}_File") . $DS{$ds}),
+                     br, 'Event Filter Regex: ',
+                     textfield(-name=>"${ds}_EvtFilter", -class=>'small',
+                               -default=>param("${ds}_EvtFilter"))),
+                     td({-align=>'center'}, 'N/A');
+        } elsif ( $type eq 'tmpl' ) {
+            print td('File&nbsp;RE:',
+                     textfield(-name=>"${ds}_File", -class=>'small',
+                               -title=>'All files matching the regular expression will automatically be generated Data Sources on the graph',
+                               -default=>param("${ds}_File"), -size=>40), br,
+                     'DS:', textfield(-name=>"${ds}_DS", -class=>'small',
+                                      -title=>'Name of the Data Source to use',
+                                      -default=>param("${ds}_DS")), br,
+                     'Element:',
+                     textfield(-name=>"${ds}_Element", -class=>'small',
+                               -title=>'Use this to define a CDEF for each individual Data Source',
+                               -default=>param("${ds}_Element")),
+                     'Formula:',
+                     textfield(-name=>"${ds}_Formula", -class=>'small',
+                               -title=>'Operation to use to combine all Data Sources into one, for example, for the total, use "+"',
+                               -default=>param("${ds}_Formula")),
+                     hidden("${ds}_NEW", ''));
+        } elsif ( $type eq 'def' ) {
+            my $v = '';
+            $v = '/VDEF' if ( $RRDs::VERSION >= 1.2 );
+            print td({-align=>'center'}, "CDEF${v} Definition",
+                     hidden("${ds}_File", ''));
+        } elsif ( $type eq 'rule' ) {
+            print td({-align=>'center'}, 'RULE Definition',
+                     hidden("${ds}_File", ''));
+        } else {
+            die "Ugh, we should not be here!";
+        }
+
+        # RRA/CDEF
+        my @rra = @rranames;
+        if ( $RRDs::VERSION >= 1.2 && $type eq 'def' ) {
+            if ( param("${ds}_Type") ne 'GPRINT'
+                 || param("${ds}_RRA") =~ /^.DEF$/ ) {
+                @rra = ();
+                param("${ds}_RRA", 'CDEF')
+                    unless ( param("${ds}_RRA") =~ /^.DEF$/ );
+            }
+            push @rra, 'VDEF', 'CDEF';
+        }            
+        print td(( $type eq 'rule' ) ? 'Value:'
+                 : popup_menu(-name=>"${ds}_RRA", -class=>'small',
+                              -values=>[@rra],
+                              -labels=>\%rranames,
+                              -default=>param("${ds}_RRA")),
+                 br,
+                 textfield(-name=>"${ds}_CDEF", -class=>'small',
+                           -title=>'CDEF/VDEF formula',
+                           -default=>param("${ds}_CDEF"),
+                           -size=>11))
+            unless ( $type eq 'evt' );
+
+        # Type/Color
+        my @gt;
+        if ( $type eq 'evt' ) {
+            @gt = ( 'VRULE' );
+        } elsif ( $type eq 'rule' ) {
+            # HRULE deprecated in 1.2
+            if ( $RRDs::VERSION >= 1.2 ) {
+                if ( param("${ds}_Type") eq 'VRULE' ) {
+                    @gt = ( 'VRULE' );
+                } else {
+                    @gt = grep(/(RULE$|^LINE)/, @graphtypes);
+                }
+            } else {
+                @gt = grep(/RULE$/, @graphtypes);
+            }
+        } elsif ( $RRDs::VERSION >= 1.2 ) {
+            # HRULE & STACK deprecated in 1.2
+            if ( param("${ds}_Type") ne 'STACK' ) {
+                @gt = grep(!/^(HRULE|STACK)$/, @graphtypes);
+            } else {
+                @gt = grep(!/^HRULE$/, @graphtypes);
+            }
+        } else {
+            @gt = grep(!/^(LINE\?|SHIFT|TICK)$/, @graphtypes);
+        }
+
+        print td({-bgcolor=>$colors{param("${ds}_Color")},
+                  -id=>"${ds}_Colorize"},
+                 popup_menu(-name=>"${ds}_Type", -class=>'small',
+                            -id=>"${ds}_Type",
+                            -values=>[@gt],
+                            -default=>param("${ds}_Type"),
+                            -onchange=>"TypeCB(this.value, \"${ds}\")"),
+                 ( $RRDs::VERSION >= 1.2
+                   && ( $type eq 'ds' || $type eq 'def' || $type eq 'tmpl' )) ?
+                 checkbox(-id=>"${ds}_STACK", -name=>"${ds}_STACK",
+                          -title=>'Whether to stack this element on top of the previous one',
+                          -label=>'', -value=>'Y') : '',
+                 popup_menu(-name=>"${ds}_Color", -class=>'small',
+                            -id=>"${ds}_Color",
+                            -values=>[sort Sort_Colors keys(%colors)],
+                            -default=>param("${ds}_Color"),
+                            -onchange=>"SetBgColor(this, \"${ds}_Colorize\")"));
+
+        # Label/Format
+        my $width = textfield(-name=>"${ds}_Width", -class=>'small',
+                              -title=>'Width for TICK (0 to 1) and LINE? commands',
+                              -id=>"${ds}_Width",
+                              -size=>3,
+                              -default=>param("${ds}_Width"));
+        $width = '' unless ( $RRDs::VERSION >= 1.2 );
+        print td(textfield(-name=>"${ds}_Label", -class=>'small',
+                           -title=>'Graph label, format for GPRINT commands, offset for SHIFT commands',
+                           -default=>param("${ds}_Label"),
+                           -size=>15),
+                 $width);
+
+        # GPRINTs
+        if ( $type ne 'evt' && $type ne 'rule' ) {
+            print td({-align=>'center'},
+                     checkbox_group(-name=>"${ds}_XTRAS",
+                                    -values=>[@rranames],
+                                    -labels=>\%rra,
+                                    -defaults=>param("${ds}_XTRAS")));
+        } else {
+            print td({-align=>'center'}, 'N/A');
+        }
+
+        # BR
+        print td({-align=>'center'},
+                 checkbox(-name=>"${ds}_BR", -label=>'', -value=>'Y',
+                          -title=>'Whether or not to add a line break (in the legend area) after this element'));
+
+        print '<script type="text/javascript">TypeCB("'. param("${ds}_Type")
+            .'", "'. $ds .'")</script>';
+
+        print "</tr>\n\n";
+
+        next unless ( $rowcount == 2 );
+
+        if ( $RRDs::VERSION >= 1.2 ) {
+            # STACK deprecated in 1.2
+            @gt = grep(!/^(.RULE|SHIFT|STACK)$/, @graphtypes);
+        } else {
+            @gt = grep(!/^(.RULE|LINE\?|SHIFT|TICK)$/, @graphtypes);
+        }
+        $width = textfield(-name=>"${ds}_tWidth", -class=>'small',
+                           -title=>'Width for TICK (0 to 1) and LINE? commands',
+                           -id=>"${ds}_tWidth",
+                           -size=>3,
+                           -default=>param("${ds}_tWidth"))
+            if ( $RRDs::VERSION >= 1.2 );
+        print
+            Tr({-class=>'small'},
+               td({-align=>'center'}, 'N/A'),
+               td(checkbox_group(-name=>"${ds}_tColors",
+                                 -values=>[sort Sort_Colors keys(%colors)],
+                                 -defaults=>param("${ds}_tColors"))),
+               td($rranames{param("${ds}_RRA")}, br,
+                  textfield(-name=>"${ds}_tCDEF", -class=>'small',
+                            -size=>11, -default=>param("${ds}_tCDEF"))),
+               td(popup_menu(-name=>"${ds}_tType", -class=>'small',
+                             -values=>[@gt], -default=>param("${ds}_tType")),
+                  radio_group(-name=>"${ds}_tSTACK", -label=>'',
+                              -values=>[ 'N', 'Y', '+' ], -default=>'N',
+                              -title=>'Whether to stack these elements on top of the previous one')),
+               td(textfield(-name=>"${ds}_tLabel", -class=>'small',
+                            -size=>15, -default=>param("${ds}_tLabel")),
+                  $width),
+               td({-align=>'center'},
+                  checkbox_group(-name=>"${ds}_tXTRAS",
+                                 -values=>[@rranames], -labels=>\%rra,
+                                 -defaults=>param("${ds}_tXTRAS"))),
+               td({-align=>'center'},
+                  checkbox(-name=>"${ds}_tBR", -label=>'', -value=>'Y')));
     }
 
+    print end_table;
+    print <<END;
+<script type="text/javascript">
+var t;
+i = 0;
+while (i < 3) {
+    t = document.getElementById("new" + i)
+    t.innerHTML = "Click here to " + t.innerHTML.split("to", 2)[1]
+    t.style.cursor = "pointer"
+    t = document.getElementById("newrow" + i)
+    t.style.display = "none"
+    i = i + 1
+}
+DisableToggle("$new[0]")
+DisableToggle("$new[1]")
+DisableToggle("$new[2]")
+</script>
+END
     print
-        end_table,
         p({-align=>'center'}, submit(-name=>'USERSAID',
                                      -value=>'Update'));
 }
@@ -3019,6 +3313,12 @@ sub DSConfig
 # GOptions: Lists general options for the user to set
 sub GOptions
 {
+    my $nogridfit = Tr(td('No Grid Fit'),
+                       td(checkbox(-name=>'gNoGridFit', -label=>'',
+                                   -class=>'normal',
+                                   -default=>param('gNoGridFit'))));
+    $nogridfit = '' unless ( $RRDs::VERSION >= 1.2 );
+
     print
         table({-border=>1,-align=>'center'},
               caption(em(b('Graph Options'))),
@@ -3066,10 +3366,21 @@ sub GOptions
               Tr(td('Logarithmic Auto Scaling'),
                  td(checkbox(-name=>'gLog', -label=>'', -class=>'normal',
                              -default=>param('gLog')))),
+              $nogridfit,
               Tr(td('Image Format'),
                  td(popup_menu(-name=>'gFormat', -class=>'normal',
                                -values=>[@ImgFormat],
                                -default=>param('gFormat')))),
+              Tr(td('Dates'),
+                 td(checkbox(-name=>'gDateStart', -label=>'Start',
+                             -class=>'normal',
+                             -default=>param('gDateStart')),
+                    checkbox(-name=>'gDateEnd', -label=>'End',
+                             -class=>'normal',
+                             -default=>param('gDateEnd')),
+                    checkbox(-name=>'gDateNow', -label=>'Now',
+                             -class=>'normal',
+                             -default=>param('gDateNow')))),
               Tr(td('Additional rrdgraph Options'),
                  td(textfield(-name=>'gRaw', -size=>30, -class=>'normal',
                               -default=>param('gRaw'))))),
@@ -3079,7 +3390,7 @@ sub GOptions
 
 sub DRAW_Element
 {
-    my ( $ds, $rra, $cdef, $type, $color, $label, $br, @xtras ) = ( @_ );
+    my ( $ds, $rra, $cdef, $type, $width, $stack, $color, $label, $br, @xtras ) = ( @_ );
 
     return () if ( $type eq '-Nothing-' );
 
@@ -3091,22 +3402,44 @@ sub DRAW_Element
     if ( $type eq 'COMMENT' ) {
         push @ELEM, join(':', $type, $label . (( $gp == -1 ) ? $br : ''));
     } elsif ( $type =~ /PRINT$/ ) {
-        push @ELEM, join(':', $type, (( $cdef eq '' ) ? $ds : uc($ds)), $rra,
+        my @rra = ( $rra );
+        @rra = () if ( $rra =~ /^.DEF$/ );
+        push @ELEM, join(':', $type, (( $cdef eq '' ) ? $ds : uc($ds)), @rra,
                          $label . (( $gp == -1 ) ? $br : ''));
     } elsif ( $type =~ /RULE$/ ) {
+        # HRULE is deprecated in 1.2
+        $type = 'LINE1' if ( $type eq 'HRULE' && $RRDs::VERSION >= 1.2 );
         push @ELEM, join(':', $type, $cdef . $colors{$color},
                          $label . (( $gp == -1 ) ? $br : ''));
     } else {
+        if ( &IsNum($cdef) ) {
+            # It's a value, not a valid CDEF
+            $ds = $cdef;
+            $cdef = '';
+        }
+        $type = 'LINE'. $width if ( $type eq 'LINE?' );
+        my @stack = ();
+        @stack = ( 'STACK' ) if ( $stack );
         push @ELEM, join(':', $type,
                          (( $cdef eq '' ) ? $ds : uc($ds)) . $colors{$color},
-                         $label . (( $gp == -1 ) ? $br : ''));
+                         (( $type eq 'TICK' ) ? $width .':' : '' )
+                          . $label . (( $gp == -1 ) ? $br : ''), @stack);
     }
+
+    return @ELEM if ( &IsNum($ds) );
 
     my $i = 0;
     while ( $i <= $gp ) {
-        push @ELEM, join(':', 'GPRINT',
-                         (( $cdef eq '' ) ? $ds : uc($ds) ), $xtras[$i],
-                         $rranames{$xtras[$i]}
+        my $vname = ( $cdef eq '' ) ? $ds : uc($ds);
+        my @rra = ( $xtras[$i] );
+        if ( $RRDs::VERSION >= 1.2 ) {
+            push @ELEM, 'VDEF:'. $vname .'_'. $xtras[$i]
+                .'='. $vname .','. $xtras[$i]
+                . ( ( length($xtras[$i]) == 3 ) ? 'IMUM' : '' );
+            $vname .= '_'. $xtras[$i];
+            @rra = ();
+        }
+        push @ELEM, join(':', 'GPRINT', $vname, @rra, $rranames{$xtras[$i]}
                          . "\\: ". $gformat ."%s" . (( $i == $gp ) ? $br : ''));
         $i += 1;
     }
@@ -3124,15 +3457,15 @@ sub DRAW
     my ( $mode ) = ( @_ );
     my ( @DEF, @CDEF, @ELEM, @Options ) = ( (), (), (), () );
 
+    my ( $start, $end );
+    $start = ( defined(param('Start')) && param('Start') ne '' ) ?
+        param('Start') : 'end - 1 day';
+    $end = ( defined(param('End')) && param('End') ne '' ) ?
+        param('End') : 'now';
+    
     my ( $startts, $endts ) = ( 0, time );
     if ( defined(&RRDs::times) ) {
-        ( $startts, $endts ) = RRDs::times(( defined(param('Start'))
-                                             && param('Start') ne '' )
-                                           ? param('Start') : 'end - 1 day',
-                                           ( defined(param('End'))
-                                             && param('End') ne '' )
-                                           ? param('End') : 'now' );
-        
+        ( $startts, $endts ) = RRDs::times($start, $end);
         if ( defined(RRDs::error) ) {
             if ( $mode == 0 ) {
                 &Error(RRDs::error);
@@ -3160,46 +3493,65 @@ sub DRAW
                 my $re = param("${ds}_File");
                 my $count = 0;
                 my @colors = param("${ds}_tColors");
-                my $dsdef = '';
+                my ( @dscdefs, @dselements );
                 foreach $file ( sort(@rrdfiles) ) {
                     next unless ( $file =~ /\.rrd$/ );
                     if ( $file =~ /$re/ ) {
+                        # Don't consider stale files which have nothing
+                        # interesting to contribute to the graph.
+                        next unless ( (stat($file))[9] >= $startts );
+                        next unless ( RRDs::last($file) >= $startts );
+
                         $file =~ s/:/\\:/g;
+
+                        # Check for real values
+                        my @dsxz = ( join(':', 'DEF', 'xz='. $file,
+                                          param("${ds}_DS"),
+                                          param("${ds}_RRA")),
+                                     join(':', 'PRINT', 'xz',
+                                          param("${ds}_RRA"), '%lf') );
+
+                        my ($graphret, $xs, $ys) = RRDs::graph(( $Config{'osname'} eq 'MSWin32' ) ? 'NUL:' : '/dev/null', "--start", $startts, "--end", $endts, @dsxz);
+                        next if ( ${$graphret}[0] eq "nan" );
+
+                        # Looks good, use it
                         push @DEF, join(':', 'DEF',
                                         $ds . $count .'='. $file,
                                         param("${ds}_DS"), param("${ds}_RRA"));
-                        if ( $dsdef eq '' ) {
-                            $dsdef = $ds . $count;
-                            $dsdef .= ','. param("${ds}_Element")
-                                if ( param("${ds}_Element") ne '' );
-                            $dsdef =~ s/\$/$ds$count/g;
-                        } else {
-                            $dsdef .= ','. $ds . $count;
-                            $dsdef .= ','. param("${ds}_Element")
-                                if ( param("${ds}_Element") ne '' );
-                            $dsdef .= ','. param("${ds}_Formula");
-                            $dsdef =~ s/\$/$ds$count/g;
-                        }
+                        my $elmt = $ds . $count;
+                        $elmt .= ','. param("${ds}_Element")
+                            if ( param("${ds}_Element") ne '' );
+                        $elmt =~ s/\$/$ds$count/g;
+                        push @dselements, $elmt;
 
                         if ( param("${ds}_tCDEF") ne '' ) {
                             my $cdef = param("${ds}_tCDEF");
                             $cdef =~ s/\$/$ds$count/g;
-                            push @CDEF, join(':', 'CDEF',
-                                             uc($ds . $count) .'='. $cdef);
+                            push @dscdefs, join(':', 'CDEF',
+                                                uc($ds . $count) .'='. $cdef);
                         }
 
                         my $label = param("${ds}_tLabel");
                         my @subs = ( $file =~ /$re/ );
                         $label = &ExpandMatches($label, \@subs);
                         $pad = "" if ( $label =~ /(%|\\)/ || $label =~ /^\s*$/);
-                        my $type = param("${ds}_tType");
-                        $type = 'STACK'
-                            if ( $count > 0 && defined(param("${ds}_tSTACK"))
-                                 && param("${ds}_tSTACK") );
+                        my ( $type, $stack ) = ( param("${ds}_tType"), 0 );
+                        if ( defined(param("${ds}_tSTACK")) ) {
+                            if ( ( $count > 0 && param("${ds}_tSTACK") eq 'Y' )
+                                 || param("${ds}_tSTACK") eq '+' ) {
+                                if ( $RRDs::VERSION >= 1.2 ) {
+                                    $stack = 1;
+                                } else {
+                                    $type = 'STACK';
+                                }
+                            }
+                        }
                         push @ELEM, &DRAW_Element($ds . $count,
                                                   param("${ds}_RRA") .'',
                                                   param("${ds}_tCDEF"),
                                                   $type,
+                                                  param("${ds}_tWidth"),
+                                                  $stack,
                                                   ( scalar(@colors) == 0 ) ?
                                                   param("${ds}_Color") :
                                           $colors[$count%scalar(@colors)],
@@ -3212,8 +3564,35 @@ sub DRAW
                         $count += 1;
                     }
                 }
-                push @CDEF, join(':', 'CDEF', $ds .'='. $dsdef)
-                    unless ( param("${ds}_Formula") eq '' );
+                foreach ( @dscdefs ) {
+                    $_ =~ s/\#/$count/g;
+                    push @CDEF, $_;
+                }
+                if ( param("${ds}_Formula") ne '' ) {
+                    my $dsdef = '';
+                    my $i;
+                    my $first = shift @dselements;
+                    if ( param("${ds}_Formula") eq 'AVERAGE' ) {
+                        $dsdef  = "$first,". join(",+,", @dselements);
+                        $dsdef .= ",+,$count,/";
+                    } elsif ( param("${ds}_Formula") eq 'STDDEV' ) {
+                        my ( $sum, $sumsq );
+                        $sum    = "$first,". join(",+,", @dselements) .",+";
+                        $sumsq  = "$first,DUP,*,";
+                        $sumsq .= join(",DUP,*,+,", @dselements) .",DUP,*,+";
+                        $dsdef  = "$sumsq,$count,/";
+                        $dsdef .= ",$sum,$count,/,DUP,*";
+                        $dsdef .= ",-";
+                        $dsdef .= ",SQRT";
+                    } else {
+                        $dsdef  = "$first,";
+                        $dsdef .= join(",". param("${ds}_Formula") .",",
+                                      @dselements);
+                        $dsdef .= ",". param("${ds}_Formula")
+                    }
+                    $dsdef =~ s/\#/$count/g;
+                    push @CDEF, join(':', 'CDEF', $ds .'='. $dsdef);
+                }
             } else {
                 my $file = param("${ds}_File");
                 $file =~ s/:/\\:/g;
@@ -3222,10 +3601,24 @@ sub DRAW
                     unless ( param("${ds}_File") eq '' );
             }
             if ( param("${ds}_CDEF") ne ''
-                 && param("${ds}_Type") !~ /RULE$/ ) {
+                 && param("${ds}_Type") !~ /RULE$/
+                 && !&IsNum(param("${ds}_CDEF")) ) {
                 my $cdef = param("${ds}_CDEF");
                 $cdef =~ s/\$/$ds/g;
-                push @CDEF, join(':', 'CDEF', uc($ds) .'='. $cdef);
+                push @CDEF, join(':', ( param("${ds}_RRA") eq 'VDEF' )
+                                 ? 'VDEF' : 'CDEF', uc($ds) .'='. $cdef);
+            }
+            if ( param("${ds}_Type") eq 'SHIFT' ) {
+                if ( param("${ds}_CDEF") eq ''
+                     && param("${ds}_Formula") eq '' ) {
+                    push @DEF,  join(':', 'SHIFT', $ds, param("${ds}_Label"));
+                } else {
+                    push @CDEF,  join(':', 'SHIFT',
+                                      ( param("${ds}_Formula") eq '' ) ?
+                                      uc($ds) : $ds,
+                                      param("${ds}_Label"));
+                }
+                next;
             }
             $pad = ""
                 if ( param("${ds}_Label") =~ /(%|\\)/
@@ -3233,6 +3626,8 @@ sub DRAW
             push @ELEM, &DRAW_Element($ds, param("${ds}_RRA") .'',
                                       param("${ds}_CDEF"),
                                       param("${ds}_Type"),
+                                      param("${ds}_Width"),
+                                      defined(param("${ds}_STACK")),
                                       param("${ds}_Color"),
                                       $pad . param("${ds}_Label") . $pad,
                                       defined(param("${ds}_BR")) ? '\n' : '',
@@ -3253,22 +3648,11 @@ sub DRAW
 
                     if ( !defined($format) ) {
                         # Try to be smart about the timestamps format
-                        my @now = localtime;
-                        my @then = localtime($1);
-                        if ( ( $then[5] == $now[5] - 1 && $then[7] < $now[7] )
-                             || $then[5] < $now[5] -1 ) {
-                            # More than a year ago..
-                            $format = "%a %b %e %H:%M %Y";
-                        } elsif ( ( $then[5] == $now[5]
-                                    && $then[7] < $now[7] - 30 )
-                                  || ( $then[5] == $now[5] -1
-                                       && $then[7] - 365 < $now[7] - 30 ) ) {
+                        my $now = time;
+                        if ( $now - $ts > 30 * 86400 ) {
                             # More than a month ago..
-                            $format = "%a %b %e %H:%M";
-                        } elsif ( ( $then[5] == $now[5]
-                                    && $then[7] < $now[7] - 30 )
-                                  || ( $then[5] == $now[5] -1
-                                       && $then[7] - 365 < $now[7] - 7 ) ) {
+                            $format = "%Y-%m-%d %H:%M";
+                        } elsif ( $now - $ts > 7 * 86400 ) {
                             # More than a week ago..
                             $format = "%a %e %H:%M";
                         } else {
@@ -3276,7 +3660,7 @@ sub DRAW
                         }
                     }
 
-                    $msg = '['. strftime($format, localtime($1)) .'] '. $msg;
+                    $msg = '['. strftime($format, localtime($ts)) .'] '. $msg;
                     next unless ( $re eq '' || $msg =~ /$re/ );
                     $msg = param("${ds}_Label")
                         if ( defined(param("${ds}_Label"))
@@ -3311,14 +3695,25 @@ sub DRAW
         $i += 1;
     }
 
-    if ( defined(param('Start')) && param('Start') ne '' ) {
-        push @Options, '--start=' . param('Start');
-    } else {
-        push @Options, '--start=end-86400';
+    if ( defined(param('gDateStart')) && defined(param('gDateEnd')) ) {
+        push @ELEM, "COMMENT:".
+            strftime("%a %Y-%m-%d %H\\:%M", localtime($startts)) .
+            " - ". 
+            strftime("%a %Y-%m-%d %H\\:%M", localtime($endts)) ."\\c";
+    } elsif ( defined(param('gDateStart')) ) {
+        push @ELEM, "COMMENT:". strftime("%a %Y-%m-%d %H\\:%M",
+                                            localtime($startts)). "\\n";
+    } elsif ( defined(param('gDateEnd')) ) {
+        push @ELEM, "COMMENT:". strftime("%a %Y-%m-%d %H\\:%M",
+                                            localtime($endts))  ."\\r";
     }
-    push @Options, '--end=' . param('End')
-        if ( defined(param('End')) && param('End') ne ''
-             && param('End') ne 'now' );
+    if ( defined(param('gDateNow')) ) {
+        push @ELEM, "COMMENT:Created on". strftime("%a %Y-%m-%d %H\\:%M",
+                                                   localtime($endts))  ."\\r";
+    }
+
+    push @Options, '--start='. $start;
+    push @Options, '--end='. $end;
     my $option;
     foreach $option ( keys(%goptions) ) {
         push @Options, $goptions{$option} . '=' . param("$option")
@@ -3338,6 +3733,8 @@ sub DRAW
         push @Options, '--alt-autoscale-max';
     }
     push @Options, '--logarithmic' if ( defined(param('gLog')) );
+    push @Options, '--no-gridfit'
+        if ( defined(param('gNoGridFit')) && $RRDs::VERSION >= 1.2 );
     push @Options, '--interlaced';
     push @Options, '--no-legend' if ( defined(param('gNoLegend')) );
     push @Options, split(/ /, param('gRaw')) if ( defined(param('gRaw')) );
@@ -3353,12 +3750,10 @@ sub DRAW
         } else {
             # Find out whether this is a configured view
             my $view = scalar(@dv_name);
-            if ( defined(param('Start'))
-                 && ( !defined(param('End')) || param('End') eq  ''
-                      || param('End') eq 'now' ) ) {
+            if ( defined(param('Start')) && $end eq 'now' ) {
                 $view = 0;
                 while ( $view < scalar(@dv_name) ) {
-                    last if ( $dv_def[$view] eq param('Start') );
+                    last if ( $dv_def[$view] eq $start );
                     $view += 1;
                 }
             }
@@ -3513,10 +3908,10 @@ sub DRAW
     return 1;
 }
 
-# GraphURL: Return a graph URL
-sub GraphURL
+# GraphHTML: Returns HTML to include a graph in a page
+sub GraphHTML
 {
-    croak 'GraphURL(name, base, [start [, end, [width, height, nolegend]]])'
+    croak 'GraphHTML(name, base, [start [, end, [width, height, nolegend]]])'
         if ( scalar(@_) < 2 || scalar(@_) > 7 );
     my ( $name, $base, $start, $end, $width, $height, $nolegend ) = ( @_ );
 
@@ -3536,7 +3931,19 @@ sub GraphURL
     $query->param('Height', $height) if ( defined($height) );
     $query->param('NoLegend', 1) if ( defined($nolegend) );
 
-    return $query->url(-path_info=>1, -query=>1, -relative=>1);
+    # Image or Other?
+    my $type = Definition_Get($name, 'gFormat');
+    my $url = $query->url(-path_info=>1, -query=>1, -relative=>1);
+    if ( !defined($type) || $type =~ /^(PNG|GIF)/ ) {
+        return img({-src=>$url,-align=>'center', -border=>0,
+                    -onerror=>'this.onerror=null; this.src="/icons/unknown.gif"'});
+    } elsif ( $type eq 'SVG' ) {
+        return "<object data='$url' type='image/svg+xml' align='center'><embed src='$url' type='image/svg+xml' align='center'><noembed>Your browser does not support embedded $type files.</noembed></embed></object>";
+    } else {
+        # Could we do better? Do we care to?
+        return a({-href=>$url}, "$type Document: '".
+                 Definition_Get($name, 'gTitle') ."'");
+    }
 }
 
 sub TMPLFind
@@ -3847,7 +4254,8 @@ sub BoardConfig
                           -values=>[sort { $pretty{$a} cmp $pretty{$b} }
                                     (keys(%pretty))],
                           -labels=>\%pretty,
-                          -default=>param("${item}_dname")) . $tmpl),
+                          -default=>param("${item}_dname"),
+                          -onchange=>"ToggleDB(\"${item}\")") . $tmpl),
             td({-align=>'center'},
                popup_menu(-name=>"${item}_type", -class=>'small',
                           -values=>\@tstyles));
@@ -3938,7 +4346,7 @@ sub ShowLog
                                : ( $id =~ /^t/ ) ? 'Template'
                                : 'Dashboard', substr($id, 1));
             print
-                Tr(td(localtime($ts) .''),
+                Tr(td(strftime("%Y-%m-%d %H:%M", localtime($ts)) .''),
                    td((-e "$saved_dir/RCS/$id,v") ? 
                       a({-href=>MakeURL('Browse', 'Rcs', 'Id', $id)},
                         img({-src=>$icon_text, -border=>0})) : '',
@@ -4002,13 +4410,17 @@ sub ShowRcsLog
 
 sub MakeURL
 {
-    croak 'MakeURL(name1, value1, ...)' unless ( scalar(@_) % 2 == 0 );
+    confess 'MakeURL(name1, value1, ...)' unless ( scalar(@_) % 2 == 0 );
 
     my $query = new CGI;
     $query->delete_all;
     while ( scalar(@_) > 0 ) {
         if ( defined($_[1]) ) {
-            $query->param(shift @_, shift @_);
+            if ( ref($_[1]) eq 'ARRAY' ) {
+                $query->param(-name=>shift @_, -value=>shift @_);
+            } else {
+                $query->param(shift @_, shift @_);
+            }
         } else {
             shift @_; shift @_;
         }
@@ -4021,6 +4433,10 @@ sub Sort_Colors_Init
 {
     my $color;
     foreach $color ( keys(%colors) ) {
+        if ( $colors{$color} eq '' ) {
+            $colorsidx{$color} = 301;
+            next;
+        }
         my $x = hex(substr($colors{$color}, 1, 2)) / 256 - 0.5;
         my $y = hex(substr($colors{$color}, 3, 2)) / 256 - 0.5;
         my $z = hex(substr($colors{$color}, 5, 2)) / 256 - 0.5;
@@ -4074,11 +4490,28 @@ sub DSNew
     param("${name}_DS", $DSname);
     param("${name}_RRA", $CFname);
     param("${name}_Seq", scalar(keys(%DS))+1);
+    if ( $use_pnp4nagios ) {
+        my ( $xml_file, $xml, $data_xml, $ds_xml );
+        $xml = new XML::Simple;
+        $xml_file = $rrdfile;
+        if ( $xml_file =~ s/rrd$/xml/g ) {
+            $data_xml = $xml->XMLin($xml_file);
+            foreach $ds_xml ( @{$data_xml->{DATASOURCE}} ) {
+                if ( $DSname == $ds_xml->{DS} ) {
+                    $DSname = $ds_xml->{NAME};
+                }
+            }
+        }
+    }
     param("${name}_Label", "$DSname $CFname");
+    param("${name}_Width", '');
     param("${name}_CDEF", '');
     param("${name}_Type", 'LINE1');
+    param("${name}_STACK", 0);
     param("${name}_Color", (sort Sort_Colors keys(%colors))
-          [(param("${name}_Seq") -1) % scalar(keys(%colors))]);
+          [(((param("${name}_Seq") -1) * 6) % scalar(keys(%colors)))
+           + ((param("${name}_Seq") -1) / (scalar(keys(%colors)) / 6))
+            + 1]);
     param("${name}_XTRAS", ());
     param("${name}_BR", 0);
     return $name;
@@ -4124,6 +4557,13 @@ sub time2str
     my ( $sec, $min, $hour, $mday, $mon, $year, $wday) = gmtime($time);
     return sprintf("%s, %02d %s %0d %02d:%02d:%02d GMT", $weekday[$wday],
                    $mday, $month[$mon], $year + 1900, $hour, $min, $sec);
+}
+
+sub IsNum
+{
+    croak 'IsNum($str)' if ( scalar(@_) != 1 );
+
+    return ( $_[0] =~ /^-?\d+\.?\d*$/ );
 }
 
 sub Error
@@ -4205,23 +4645,30 @@ sub help_graphfiles
 sub help_dsconfig
 {
     return
-        p('Data Source configuration is contained into a single table which allows configuring graph elements from these Data Sources.  Each line typically allows configuring a single Data Source and/or CDEF:',
+        p('Data Source configuration is contained into a single table which allows configuring graph elements from these Data Sources.  The basic format is for each row to allow configuring a single Data Source and/or CDEF, although various elements are displayed slightly differently.  It is important to understand and realize that ', em('drraw'), ' does not fully check what you specify to be valid.  It does, however, try to steer you away from simple mistakes, but ultimately, only ', a({-href=>'http://www.rrdtool.org/'}, 'RRDtool'), ' fully checks the syntax of your settings.  The table columns are as follows:',
           ul(li(b('DEL?'), ': Check to remove this line'),
              li(b('Name'), ': Data Source virtual name.  This is the name that you can reference in CDEFs.'),
              li(b('Seq'), ': Sequence'),
              li(b('Data Source'), ': Configuration depends on the type of Data Source being configured:',
                 ul(li(b('Regular Data Source'), ': this is the RRD File and Data Source defined'),
-                   li('"pure" ', b('CDEF'), ': this is blank'),
-                   li(b('Event Data Sources'), ': this is the Event File.  These files contain one event per line, prefixed by the event timestamp (the number of non-leap seconds since whatever time the system considers to be the epoch) followed by a space.  These events are automatically added to the graph as VRULE elements.'),
-                   li(b('Data Source Template'), ': this defines how Data Sources will be automatically generated by ', em('drraw'), ':', br, 'For each RRD File matching the "File RE", a Data Source will be created for the specified Data Source name.  The second row allows defining how each created Data Source will be displayed as if it was a Regular Data Sources.  The "Label" entry may contain references ($1, $2, ..) to subexpressions defined by the "File RE".  All these Data Sources may be combined into one Data Source by using the "Element" and "Formula" fields.  The former is applied to each Data Source individually, and the latter used to combine them together.  For example, to get the sum of all Data Sources, use "+" as "Formula".  In addition, if you want to make sure you get a real value for the combined Data Source and not NaN whenever one of the element values is NaN, you may use "UN,0,$,IF" in the "Element" field.')),
+                   li(b('HRULE'), ', ', b('VRULE'), ' graph elements as well as "pure" ', b('CDEF'), ' or ', b('VDEF'), ': this is blank'),
+                   li(b('Event Data Sources'), ': this is the Event File.  These files contain one event per line, prefixed by the event timestamp (the number of non-leap seconds since whatever time the system considers to be the epoch) followed by a space.  These events are automatically added to the graph as ', b('VRULE'), ' elements.'),
+                   li(b('Data Source Template'), ': this defines how Data Sources will be automatically generated by ', em('drraw'), ':', br, 'For each RRD File matching the "File RE", a Data Source will be created for the specified Data Source name.',
+                      ul(li('The second row allows defining how each created Data Source will be displayed as if it was a Regular Data Sources.'),
+                         li('The "Label" entry may contain references ($1, $2, ..) to subexpressions defined by the "File RE".'),
+                         li('All these Data Sources may be combined into a composite Data Source by using the "Element" and "Formula" fields.  The former is applied to each Data Source individually, and the latter used to combine them together.  For example, to get the sum of all Data Sources, use "+" as "Formula".  In addition, if you want to make sure you get a real value for the combined Data Source and not NaN whenever one of the element values is NaN, you may use "UN,0,$,IF" in the "Element" field.'),
+                         li('You may also use "AVERAGE" or "STDDEV" in the "Formula" field to have ', em('drraw'), ' calculate the average or the standard deviation (respectively).'),
+                         li('The character "#" will be replaced by the count of Data Sources defined by the "File RE".')))),
                 'Checking the "Lists" option allows changing the Data Source file for Regular and Event Data Sources'),
-             li(b('RRA'), ': RRA selection for Data Sources'),
-             li(b('CDEF'), ': If defined, this will be used to create a CDEF that will be used in place of the Data Source.  The CDEF virtual name is the Data Source virtual name in uppercase (see below).  The character "$" will automatically be replaced by the Data Source virtual name.'),
+             li(b('RRA'), ': RRA selection for Data Sources, or ', b('CDEF'), '/', b('VDEF'), ' choice'),
+             li(b('CDEF'), ': If defined, this will be used to create a ', b('CDEF'), ' that will be used in place of the Data Source.  The ', b('CDEF'), ' virtual name is the Data Source virtual name in uppercase (see below).  The character "$" will automatically be replaced by the Data Source virtual name.  This is also used as the formula for "pure"', b('CDEF'), ' and ', b('VDEF'), ' definitions, as well as the value for ', b('HRULE'), ' and ', b('VRULE'), ' graph elements.'),
              li(b('Type'), ': Graph element type'),
              li(b('Color'), ': Graph element color (if applicable)'),
              li(b('Label / Format'), ': Legend label, or format.  For convenience, the first label of each line (in the legend area) is padded with spaces so that all such labels are of the same length.  No padding is done if the label contains a % or \\ character.'),
-             li(b('Additional GPRINTs'), ': For each defined RRA, additional GPRINTs may be automatically generated for the Data Source (or CDEF is defined) and added to the legend.'),
-             li(b('BR'), ': Whether or not to add a line break (in the legend area) after this element')));
+             li(b('Width'), ': Width for ', b('TICK'), ' and ', b('LINE?'), ' graph elements.  (', a({-href=>'http://www.rrdtool.org/'}, 'RRDtool'), ' 1.2 and above only)'),
+             li(b('Additional GPRINTs'), ': For each defined RRA, additional GPRINTs may be automatically generated for the Data Source (or CDEF if it is defined) and added to the legend.'),
+             li(b('BR'), ': Whether or not to add a line break (in the legend area) after this element'))).
+        p(b('Note'), ':  If you are using ', a({-href=>'http://www.rrdtool.org/'}, 'RRDtool'), ' 1.2 or above, ', em('drraw'), ' automatically enables new features available with it, and silently disables deprecated features.  However, deprecated features used in previously saved graphs are ', b('not'), ' automatically updated if you edit the graph and save it again.  When possible, deprecated features in use in previously saved graphs are nonetheless converted when running ', a({-href=>'http://www.rrdtool.org/'}, 'RRDtool'));
 }
 
 sub help_templates
@@ -4265,14 +4712,17 @@ sub help_urls
         h4('drraw URLs') .
         p('The URLs used by ', em('drraw'), ' to view defined graphs, templates and dashboards are fairly short, and as such, suitable for use in e-mail or other web pages.  The internal ID used to reference a graph, template or dashboard is generated upon creation (or cloning) and will remain the same for a given item.  It is interesting to note that the following options may be applied to actual graph (e.g. image) URLs to override settings saved:',
           ul(li('Start'), li('End'), li('Width'), li('Height'),
-             li('NoLegend')));
+             li('NoLegend'), li('Format')));
 }
 
 sub help_contact
 {
     return
-        h4('Mailing list') .
+        h4('Mailing lists') .
         p('If you want to be informed about important news about ', em('drraw'), ', such as new releases, subscribe to the drraw-announce mailing list, either by sending a mail including the "subscribe" keyword to ', a({-href=>'mailto:drraw-announce-request@taranis.org?body=subscribe'}, 'drraw-announce-request@taranis.org'), 'or simply visit the following web page: ', a({-href=>'http://web.taranis.org/mailman/listinfo/drraw-announce'}, 'http://web.taranis.org/mailman/listinfo/drraw-announce'), '.') .
+        p('For other discussions or if you have questions about ', em('drraw'), ', subscribe to the drraw-users mailing list, either by sending a mail including the "subscribe" keyword to ', a({-href=>'mailto:drraw-users-request@taranis.org?body=subscribe'}, 'drraw-users-request@taranis.org'), 'or simply visit the following web page: ', a({-href=>'http://web.taranis.org/mailman/listinfo/drraw-users'}, 'http://web.taranis.org/mailman/listinfo/drraw-users'), '.  You must be a subscriber to post on this list.') .
+        h4('Wiki') .
+        p('Additional documentation can be found on ', a({-href=>'http://web.taranis.org/drraw/wiki'}, em('drraw'), ' Wiki'), '.') .
         h4('Bugs') .
         p('Send bug reports to ', a({-href=>"mailto:drraw-bugs\@taranis.org?subject=drraw bug report&body=drraw version: $VERSION, Perl $], CGI $CGI::VERSION, RRD $RRDs::VERSION on $^O with ". $ENV{'SERVER_SOFTWARE'}}, 'drraw-bugs@taranis.org'), '.  A bug report is an adequate description of the environment (versions of this package, the OS, Perl, the CGI module and RRDtool) and of the problem: your input, what you expected, what you got, and why you believe it to be wrong.  Diffs are welcome, but they only describe a solution, from which the problem might be difficult to infer.') .
         h4('Others') .
